@@ -64,9 +64,25 @@ else
     OUT_DIR="$(to_unix "${RUNNER_TEMP:-/tmp}")/xp-native"
 fi
 
-CC="${CC:-${HOST}-gcc}"
-AR="${AR:-${HOST}-ar}"
-RANLIB="${RANLIB:-${HOST}-ranlib}"
+# Detecção do toolchain:
+#   - Linux cross (gcc-mingw-w64-i686): binários com prefixo i686-w64-mingw32-
+#     (gcc, ar, ranlib, windres, objdump) -> usar --cross-compile-prefix.
+#   - MSYS2 MINGW32: só o gcc tem alias com prefixo; ar/ranlib/windres/objdump
+#     são nomes simples em /mingw32/bin -> usar nomes simples (shell MINGW32
+#     já aponta para o toolchain i686).
+if command -v "${HOST}-gcc" >/dev/null 2>&1 && command -v "${HOST}-ar" >/dev/null 2>&1; then
+    CROSS_PREFIX="${HOST}-"
+    CC="${CC:-${HOST}-gcc}"
+    AR="${AR:-${HOST}-ar}"
+    RANLIB="${RANLIB:-${HOST}-ranlib}"
+    OBJDUMP="${OBJDUMP:-${HOST}-objdump}"
+else
+    CROSS_PREFIX=""
+    CC="${CC:-gcc}"
+    AR="${AR:-ar}"
+    RANLIB="${RANLIB:-ranlib}"
+    OBJDUMP="${OBJDUMP:-objdump}"
+fi
 
 # ---------------------------------------------------------------------------
 # Flags do compilador / linker
@@ -190,8 +206,9 @@ build_zlib() {
 # biblioteca totalmente estática e sem carregamento de engines.  no-zlib evita
 # que o OpenSSL apanhe a zlib do MSYS2; o curl liga explicitamente à nossa.
 #
-# --cross-compile-prefix=i686-w64-mingw32- funciona tanto no MINGW32 (onde gcc
-# é esse binário) como em Linux (pacote gcc-mingw-w64-i686).
+# Em Linux (cross-compiler com prefixo) passa-se --cross-compile-prefix; no
+# MINGW32 da MSYS2 usa-se o gcc/ar/windres nativos do shell, porque o ar/ranlib
+# com prefixo não existe nesse ambiente.
 # ---------------------------------------------------------------------------
 build_openssl() {
     log "OpenSSL ${OPENSSL_VERSION}"
@@ -203,6 +220,11 @@ build_openssl() {
 
     (
         cd "${BUILD_ROOT}/openssl-${OPENSSL_VERSION}"
+        openssl_cross_args=()
+        if [ -n "${CROSS_PREFIX}" ]; then
+            openssl_cross_args=(--cross-compile-prefix="${CROSS_PREFIX}")
+        fi
+
         perl Configure mingw \
             no-shared \
             no-tests \
@@ -211,7 +233,7 @@ build_openssl() {
             no-engine \
             no-capieng \
             no-zlib \
-            --cross-compile-prefix="${HOST}-" \
+            ${openssl_cross_args[@]+"${openssl_cross_args[@]}"} \
             --prefix="${PREFIX_UNIX}" \
             --openssldir="${PREFIX_UNIX}/ssl" \
             "${XP_CPU_FLAGS[@]}" \
@@ -326,9 +348,9 @@ build_aurora_tls() {
         "${XP_LDFLAGS[@]}" \
         -s
 
-    if command -v "${HOST}-objdump" >/dev/null 2>&1; then
+    if command -v "${OBJDUMP}" >/dev/null 2>&1; then
         log "DLLs importadas pela AuroraTls.dll"
-        "${HOST}-objdump" -p "${OUT_DIR}/AuroraTls.dll" | grep 'DLL Name' || true
+        "${OBJDUMP}" -p "${OUT_DIR}/AuroraTls.dll" | grep 'DLL Name' || true
     fi
 }
 
