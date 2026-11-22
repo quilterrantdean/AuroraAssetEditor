@@ -12,6 +12,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Em caso de erro, emitir também uma anotação ##[error] do GitHub Actions com a
+# mensagem e a posição (o log completo do passo só é visível na página Actions).
+trap {
+    $details = ($_ | Out-String).Trim() -replace "`r?`n", ' | '
+    Write-Host "##[error]$details"
+    break
+}
+
 function Write-Step {
     param([string]$Message)
     Write-Host "==> $Message"
