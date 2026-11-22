@@ -365,24 +365,56 @@ download_plain() {
 
 # ---------------------------------------------------------------------------
 # Principal
+#
+# Todo o output passa por tee para build-tls.log e, em caso de erro, a cauda do
+# log é emitida como anotação ::error:: do GitHub Actions (visível em
+# Actions > Summary > Annotations) - evita ter de abrir o log completo.
 # ---------------------------------------------------------------------------
-mkdir -p "${PREFIX_UNIX}/include" \
-         "${PREFIX_UNIX}/lib" \
-         "${BUILD_ROOT}" \
-         "${OUT_DIR}"
+main() {
+    mkdir -p "${PREFIX_UNIX}/include" \
+             "${PREFIX_UNIX}/lib" \
+             "${BUILD_ROOT}" \
+             "${OUT_DIR}"
 
-if deps_cached; then
-    log "Dependências estáticas já presentes em ${DEPS_PREFIX} (cache)"
-else
-    log "A compilar dependências estáticas em ${DEPS_PREFIX}"
-    build_zlib
-    build_openssl
-    build_curl
-fi
+    if deps_cached; then
+        log "Dependências estáticas já presentes em ${DEPS_PREFIX} (cache)"
+    else
+        log "A compilar dependências estáticas em ${DEPS_PREFIX}"
+        build_zlib
+        build_openssl
+        build_curl
+    fi
 
-build_aurora_tls
-download_cacert
+    build_aurora_tls
+    download_cacert
 
-log "Concluído"
-echo "  AuroraTls.dll: ${OUT_DIR}/AuroraTls.dll"
-echo "  cacert.pem:    ${OUT_DIR}/cacert.pem"
+    log "Concluído"
+    echo "  AuroraTls.dll: ${OUT_DIR}/AuroraTls.dll"
+    echo "  cacert.pem:    ${OUT_DIR}/cacert.pem"
+}
+
+on_error() {
+    local status=$?
+    local command_text="${BASH_COMMAND//$'\n'/ }"
+    printf '::error title=build-tls.sh falhou::%s:%s (exit %s): %s\n' \
+        "${BASH_SOURCE[0]}" "${BASH_LINENO[0]:-0}" "${status}" "${command_text:0:400}"
+}
+
+set -E
+trap on_error ERR
+
+mkdir -p "${BUILD_ROOT}"
+LOG_FILE="${BUILD_ROOT}/build-tls.log"
+exec > >(tee "${LOG_FILE}") 2>&1
+
+on_exit() {
+    local status=$?
+    if [ "${status}" -ne 0 ]; then
+        sleep 2
+        printf '::error title=build-tls.sh (exit %s, cauda do log)::%s\n' \
+            "${status}" "$(tail -n 12 "${LOG_FILE}" | tr '\r\n' '  ' | cut -c1-900)"
+    fi
+}
+trap on_exit EXIT
+
+main
