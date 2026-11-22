@@ -1,5 +1,15 @@
 name: Aurora Asset Editor XP (Prescott + OpenSSL TLS 1.3)
 
+# Pipeline curto: todo o código auxiliar vive em xp-port/.
+#   1. Checkout deste fork -> xp-port/ copiado para um diretório temporário.
+#   2. Checkout fresco do upstream XboxUnity/AuroraAssetEditor (histórico
+#      completo, necessário para o commit 52cd4ac com as DLLs XP).
+#   3. build-tls.sh     -> zlib + OpenSSL + libcurl estáticos + AuroraTls.dll
+#   4. apply-xp-fixes.ps1 -> net40 / x86 / DLLs XP / AuroraHttpClient
+#   5. dotnet publish   -> publish/
+#   6. verify-xp.ps1    -> auditoria PE + smoke-test TLS 1.3 em 32 bits
+#   7. ZIP + SHA256 -> Artifact (90 dias) + Release opcional
+
 on:
   push:
     tags:
@@ -7,24 +17,24 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: 'Criar GitHub Release (requer permissao contents: write)'
+        description: 'Criar GitHub Release (requer contents: write)'
         required: false
         default: false
         type: boolean
       tag_name:
-        description: 'Tag da release manual (ex.: v1.4.4-xp-prescott)'
+        description: 'Tag da release manual (ex.: v1.4.3-xp-prescott)'
         required: false
-        default: 'v1.4.4-xp-prescott'
+        default: 'v1.4.3-xp-prescott'
         type: string
 
 permissions:
   contents: write
 
 env:
+  DEPS_PREFIX: 'C:/xp-prescott-deps'
   ZLIB_VERSION: '1.3.1'
   OPENSSL_VERSION: '1.1.1w'
   CURL_VERSION: '8.11.0'
-  DEPS_PREFIX: 'C:/xp-prescott-deps'
 
 jobs:
   build-xp-prescott:
@@ -32,641 +42,95 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout XboxUnity/AuroraAssetEditor (com historico para DLLs XP)
+      - name: Checkout do fork (fonte do xp-port)
+        uses: actions/checkout@v4
+        with:
+          path: port
+          persist-credentials: false
+
+      - name: Guardar xp-port em diretório temporário
+        shell: pwsh
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'xp-port'
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item -Path 'port/xp-port/*' -Destination $dest -Recurse -Force
+          "XP_PORT=$dest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Checkout fresco do upstream (histórico completo para as DLLs XP)
         uses: actions/checkout@v4
         with:
           repository: XboxUnity/AuroraAssetEditor
           fetch-depth: 0
+          path: src
+          clean: true
+          persist-credentials: false
 
+      # MINGW32 (msvcrt, 32 bits) é o único ambiente MSYS2 que produz binários
+      # compatíveis com XP - o runtime UCRT (UCRT64) não existe no XP.  A MSYS2
+      # está a descontinuar o MINGW32; o aviso de depreciação no log é esperado.
       - name: Configurar MSYS2 (MinGW32 i686)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW32
           update: true
           install: >-
-            base-devel
             mingw-w64-i686-toolchain
             perl
             make
             diffutils
-
-      - name: Cache das bibliotecas estaticas XP/Prescott (zlib + OpenSSL 1.1.1w + libcurl)
-        id: cache-xp-deps
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.DEPS_PREFIX }}
-          key: xp-prescott-tls-v2-zlib${{ env.ZLIB_VERSION }}-ossl${{ env.OPENSSL_VERSION }}-curl${{ env.CURL_VERSION }}
-
-      - name: Compilar zlib + OpenSSL 1.1.1w + libcurl estaticos para WinXP SP3 / P4 Prescott
-        if: steps.cache-xp-deps.outputs.cache-hit != 'true'
-        shell: msys2 {0}
-        run: |
-          set -euxo pipefail
-
-          PREFIX="${DEPS_PREFIX}"
-          BUILD_ROOT="/tmp/xp-build"
-          mkdir -p "${PREFIX}/include" "${PREFIX}/lib" "${BUILD_ROOT}"
-          cd "${BUILD_ROOT}"
-
-          export XP_CPU_FLAGS="-O2 -march=prescott -mtune=prescott -msse2 -msse3 -mno-ssse3 -mno-sse4 -mno-avx -mfpmath=sse"
-          export XP_WIN_DEFS="-D_WIN32_WINNT=0x0501 -DWINVER=0x0501"
-          export CFLAGS="${XP_CPU_FLAGS} ${XP_WIN_DEFS}"
-          export CPPFLAGS="${XP_WIN_DEFS} -I${PREFIX}/include"
-          export LDFLAGS="-L${PREFIX}/lib -Wl,--major-os-version,5,--minor-os-version,1 -Wl,--major-subsystem-version,5,--minor-subsystem-version,1"
-
-          # 1. Compilar zlib estatico
-          curl -fsSL "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" -o zlib.tar.gz
-          tar -xzf zlib.tar.gz
-          cd "zlib-${ZLIB_VERSION}"
-          make -f win32/Makefile.gcc CFLAGS="${CFLAGS}" SHARED_MODE=0 libz.a
-          cp -f zlib.h zconf.h "${PREFIX}/include/"
-          cp -f libz.a "${PREFIX}/lib/"
-          cd "${BUILD_ROOT}"
-
-          # 2. Compilar OpenSSL 1.1.1w estatico (TLS 1.2 + TLS 1.3, nativo WinXP)
-          curl -fsSL "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl.tar.gz
-          tar -xzf openssl.tar.gz
-          cd "openssl-${OPENSSL_VERSION}"
-          perl Configure mingw \
-            no-shared \
-            no-tests \
-            no-asm \
-            no-dso \
-            no-engine \
-            no-capieng \
-            --prefix="${PREFIX}" \
-            --openssldir="${PREFIX}/ssl" \
-            ${XP_CPU_FLAGS} \
-            ${XP_WIN_DEFS}
-          make -j"$(nproc)" build_libs
-          make install_dev
-          cd "${BUILD_ROOT}"
-
-          # 3. Compilar libcurl estatico (HTTP/HTTPS apenas, sem APIs Vista+)
-          curl -fsSL "https://github.com/curl/curl/releases/download/curl-8_11_0/curl-${CURL_VERSION}.tar.gz" -o curl.tar.gz
-          tar -xzf curl.tar.gz
-          cd "curl-${CURL_VERSION}"
-
-          export ac_cv_func_poll=no
-          export ac_cv_func_WSAPoll=no
-          export ac_cv_func_inet_pton=no
-          export ac_cv_func_inet_ntop=no
-          export ac_cv_func_if_nametoindex=no
-
-          ./configure \
-            --host=i686-w64-mingw32 \
-            --prefix="${PREFIX}" \
-            --disable-shared \
-            --enable-static \
-            --enable-http \
-            --enable-ipv6 \
-            --disable-ftp \
-            --disable-file \
-            --disable-ldap \
-            --disable-ldaps \
-            --disable-rtsp \
-            --disable-dict \
-            --disable-telnet \
-            --disable-tftp \
-            --disable-pop3 \
-            --disable-imap \
-            --disable-smb \
-            --disable-smtp \
-            --disable-gopher \
-            --disable-mqtt \
-            --disable-docs \
-            --disable-manual \
-            --disable-ntlm \
-            --without-libpsl \
-            --without-libidn2 \
-            --without-nghttp2 \
-            --without-brotli \
-            --without-zstd \
-            --without-WinSSL \
-            --with-openssl="${PREFIX}" \
-            --with-zlib="${PREFIX}" \
-            CFLAGS="${CFLAGS} -DCURL_STATICLIB" \
-            CPPFLAGS="${CPPFLAGS} -DCURL_STATICLIB" \
-            LIBS="-lws2_32 -lcrypt32 -ladvapi32 -luser32"
-
-          make -C lib -j"$(nproc)"
-          make -C lib install
-          make -C include install
-
-      - name: Compilar AuroraTls.dll (P/Invoke C + CURLSH Keep-Alive/TLS Session Cache para Prescott HT)
-        shell: msys2 {0}
-        run: |
-          set -euxo pipefail
-
-          cat << 'EOF' > /tmp/aurora_tls.c
-          #define _WIN32_WINNT 0x0501
-          #define WINVER 0x0501
-          #define CURL_STATICLIB
-          #include <windows.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <wchar.h>
-          #include <curl/curl.h>
-
-          typedef struct {
-              unsigned char *data;
-              size_t size;
-              size_t cap;
-          } MemBuf;
-
-          static volatile LONG g_init_state = 0;
-          static CURLSH *g_share = NULL;
-          static CRITICAL_SECTION g_locks[CURL_LOCK_DATA_LAST];
-          static char g_ca_bundle_utf8[MAX_PATH * 3] = {0};
-          static int g_has_ca_bundle = 0;
-
-          static void share_lock_cb(CURL *handle, curl_lock_data data, curl_lock_access access, void *userptr) {
-              (void)handle; (void)access; (void)userptr;
-              if (data >= 0 && data < CURL_LOCK_DATA_LAST) {
-                  EnterCriticalSection(&g_locks[data]);
-              }
-          }
-
-          static void share_unlock_cb(CURL *handle, curl_lock_data data, void *userptr) {
-              (void)handle; (void)userptr;
-              if (data >= 0 && data < CURL_LOCK_DATA_LAST) {
-                  LeaveCriticalSection(&g_locks[data]);
-              }
-          }
-
-          static void locate_ca_bundle(void) {
-              wchar_t module_path[MAX_PATH];
-              wchar_t ca_path[MAX_PATH];
-
-              if (GetModuleFileNameW(NULL, module_path, MAX_PATH) > 0) {
-                  wchar_t *slash = wcsrchr(module_path, L'\\');
-                  if (slash) {
-                      *slash = L'\0';
-                      _snwprintf(ca_path, MAX_PATH, L"%s\\cacert.pem", module_path);
-                      ca_path[MAX_PATH - 1] = L'\0';
-                      DWORD attr = GetFileAttributesW(ca_path);
-                      if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                          if (WideCharToMultiByte(CP_UTF8, 0, ca_path, -1, g_ca_bundle_utf8, (int)sizeof(g_ca_bundle_utf8), NULL, NULL) > 0) {
-                              g_has_ca_bundle = 1;
-                          }
-                      }
-                  }
-              }
-          }
-
-          static void ensure_initialized(void) {
-              while (g_init_state != 2) {
-                  if (InterlockedCompareExchange((LONG *)&g_init_state, 1, 0) == 0) {
-                      int i;
-                      for (i = 0; i < CURL_LOCK_DATA_LAST; i++) {
-                          InitializeCriticalSectionAndSpinCount(&g_locks[i], 4000);
-                      }
-                      curl_global_init(CURL_GLOBAL_DEFAULT);
-                      locate_ca_bundle();
-
-                      g_share = curl_share_init();
-                      if (g_share) {
-                          curl_share_setopt(g_share, CURLSHOPT_LOCKFUNC, share_lock_cb);
-                          curl_share_setopt(g_share, CURLSHOPT_UNLOCKFUNC, share_unlock_cb);
-                          curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
-                          curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
-                          curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
-                      }
-                      InterlockedExchange((LONG *)&g_init_state, 2);
-                      break;
-                  }
-                  Sleep(1);
-              }
-          }
-
-          static size_t write_mem_cb(void *contents, size_t size, size_t nmemb, void *userp) {
-              size_t realsize = size * nmemb;
-              MemBuf *mem = (MemBuf *)userp;
-              if (realsize == 0) return 0;
-
-              if (mem->size + realsize + 1 > mem->cap) {
-                  size_t new_cap = mem->cap ? mem->cap * 2 : 16384;
-                  while (new_cap < mem->size + realsize + 1) {
-                      new_cap *= 2;
-                  }
-                  unsigned char *ptr = (unsigned char *)realloc(mem->data, new_cap);
-                  if (!ptr) return 0;
-                  mem->data = ptr;
-                  mem->cap = new_cap;
-              }
-
-              memcpy(&(mem->data[mem->size]), contents, realsize);
-              mem->size += realsize;
-              mem->data[mem->size] = 0;
-              return realsize;
-          }
-
-          static CURLcode perform_request(const char *url, MemBuf *chunk, long *http_code, int verify_ssl, char *err_buf) {
-              CURL *curl = curl_easy_init();
-              if (!curl) return CURLE_FAILED_INIT;
-
-              err_buf[0] = '\0';
-              if (g_share) {
-                  curl_easy_setopt(curl, CURLOPT_SHARE, g_share);
-              }
-
-              curl_easy_setopt(curl, CURLOPT_URL, url);
-              curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_mem_cb);
-              curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)chunk);
-              curl_easy_setopt(curl, CURLOPT_USERAGENT, "AuroraAssetEditor/1.4 (Windows NT 5.1; x86)");
-              curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-              curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-              curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-              curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
-              curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
-              curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-              curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-              curl_easy_setopt(curl, CURLOPT_SSL_SESSIONID_CACHE, 1L);
-              curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, err_buf);
-
-              if (verify_ssl && g_has_ca_bundle) {
-                  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-                  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
-                  curl_easy_setopt(curl, CURLOPT_CAINFO, g_ca_bundle_utf8);
-              } else {
-                  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-                  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-              }
-
-              CURLcode res = curl_easy_perform(curl);
-              if (res == CURLE_OK && http_code) {
-                  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, http_code);
-              }
-              curl_easy_cleanup(curl);
-              return res;
-          }
-
-          __declspec(dllexport) int __cdecl AuroraHttpGet(
-              const char *url,
-              unsigned char **out_data,
-              int *out_len,
-              int *out_http_status,
-              char *out_error,
-              int out_error_cap
-          ) {
-              if (!url || !out_data || !out_len) return -1;
-              *out_data = NULL;
-              *out_len = 0;
-              if (out_http_status) *out_http_status = 0;
-              if (out_error && out_error_cap > 0) out_error[0] = '\0';
-
-              ensure_initialized();
-
-              MemBuf chunk = { NULL, 0, 0 };
-              long http_code = 0;
-              char err_buf[CURL_ERROR_SIZE] = {0};
-
-              int use_verify = g_has_ca_bundle ? 1 : 0;
-              CURLcode res = perform_request(url, &chunk, &http_code, use_verify, err_buf);
-
-              if (use_verify && (res == CURLE_SSL_CACERT || res == CURLE_PEER_FAILED_VERIFICATION || res == CURLE_SSL_CACERT_BADFILE)) {
-                  free(chunk.data);
-                  chunk.data = NULL;
-                  chunk.size = 0;
-                  chunk.cap = 0;
-                  res = perform_request(url, &chunk, &http_code, 0, err_buf);
-              }
-
-              if (out_http_status) *out_http_status = (int)http_code;
-
-              if (res != CURLE_OK) {
-                  free(chunk.data);
-                  if (out_error && out_error_cap > 0) {
-                      const char *msg = err_buf[0] ? err_buf : curl_easy_strerror(res);
-                      strncpy(out_error, msg, (size_t)(out_error_cap - 1));
-                      out_error[out_error_cap - 1] = '\0';
-                  }
-                  return (int)res;
-              }
-
-              if (http_code >= 400) {
-                  free(chunk.data);
-                  if (out_error && out_error_cap > 0) {
-                      _snprintf(out_error, (size_t)(out_error_cap - 1), "HTTP status error: %ld", http_code);
-                      out_error[out_error_cap - 1] = '\0';
-                  }
-                  return 1000 + (int)http_code;
-              }
-
-              if (!chunk.data) {
-                  chunk.data = (unsigned char *)malloc(1);
-                  if (!chunk.data) return -2;
-                  chunk.data[0] = 0;
-              }
-
-              *out_data = chunk.data;
-              *out_len = (int)chunk.size;
-              return 0;
-          }
-
-          __declspec(dllexport) void __cdecl AuroraHttpFree(unsigned char *ptr) {
-              if (ptr) {
-                  free(ptr);
-              }
-          }
-          EOF
-
-          mkdir -p xp-native
-          i686-w64-mingw32-gcc -shared \
-            /tmp/aurora_tls.c \
-            -O2 -march=prescott -mtune=prescott -msse2 -msse3 -mno-ssse3 -mno-sse4 -mno-avx -mfpmath=sse \
-            -I"${DEPS_PREFIX}/include" \
-            -L"${DEPS_PREFIX}/lib" \
-            -static-libgcc \
-            -Wl,-Bstatic -lcurl -lssl -lcrypto -lz \
-            -Wl,-Bdynamic -lws2_32 -lcrypt32 -ladvapi32 -luser32 \
-            -Wl,--kill-at \
-            -Wl,--major-os-version,5,--minor-os-version,1 \
-            -Wl,--major-subsystem-version,5,--minor-subsystem-version,1 \
-            -s \
-            -o xp-native/AuroraTls.dll
-
-          curl -fsSL "https://curl.se/ca/cacert.pem" -o xp-native/cacert.pem
+            curl
 
       - name: Configurar .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restaurar dependencias .NET 4.0 compativeis com Windows XP
+      - name: Cache das bibliotecas estáticas XP/Prescott
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_PREFIX }}
+          key: xp-prescott-tls-${{ hashFiles('port/xp-port/build-tls.sh') }}-zlib${{ env.ZLIB_VERSION }}-ossl${{ env.OPENSSL_VERSION }}-curl${{ env.CURL_VERSION }}
+
+      - name: Compilar zlib + OpenSSL + libcurl + AuroraTls.dll
+        shell: msys2 {0}
+        run: |
+          set -euxo pipefail
+          XP_PORT_UNIX="$(cygpath -u "${XP_PORT}")"
+          bash "${XP_PORT_UNIX}/build-tls.sh"
+
+      - name: Aplicar fixes XP (.NET 4.0 / x86 / AuroraHttpClient)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "xp-libs" | Out-Null
-
-          cmd /c "git cat-file -p 52cd4ac:AuroraAssetEditor/Ookii.Dialogs.Wpf.dll > xp-libs\Ookii.Dialogs.Wpf.dll"
-          cmd /c "git cat-file -p 52cd4ac:AuroraAssetEditor/System.Net.FtpClient.dll > xp-libs\System.Net.FtpClient.dll"
-          cmd /c "git cat-file -p 52cd4ac:AuroraAssetEditor/System.Data.SQLite.dll > xp-libs\System.Data.SQLite.dll"
-
-      - name: Injectar AuroraHttpClient (OpenSSL TLS 1.2/1.3) e adaptar .csproj para .NET 4.0 x86
-        shell: pwsh
-        run: |
-          @(
-            'namespace AuroraAssetEditor.Classes {',
-            '    using System;',
-            '    using System.IO;',
-            '    using System.Net;',
-            '    using System.Runtime.InteropServices;',
-            '    using System.Text;',
-            '',
-            '    internal sealed class AuroraHttpClient : IDisposable {',
-            '        [DllImport("AuroraTls.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]',
-            '        private static extern int AuroraHttpGet(',
-            '            byte[] utf8Url,',
-            '            out IntPtr outData,',
-            '            out int outLen,',
-            '            out int outHttpStatus,',
-            '            StringBuilder outError,',
-            '            int outErrorCap);',
-            '',
-            '        [DllImport("AuroraTls.dll", CallingConvention = CallingConvention.Cdecl)]',
-            '        private static extern void AuroraHttpFree(IntPtr ptr);',
-            '',
-            '        public byte[] DownloadData(Uri address) {',
-            '            if (address == null) throw new ArgumentNullException("address");',
-            '            return DownloadData(address.AbsoluteUri);',
-            '        }',
-            '',
-            '        public byte[] DownloadData(string address) {',
-            '            if (string.IsNullOrEmpty(address)) throw new ArgumentNullException("address");',
-            '',
-            '            IntPtr nativeBuf = IntPtr.Zero;',
-            '            int len = 0;',
-            '            int httpStatus = 0;',
-            '            var err = new StringBuilder(512);',
-            '            byte[] urlBytes = Encoding.UTF8.GetBytes(address + "\0");',
-            '',
-            '            try {',
-            '                int rc = AuroraHttpGet(urlBytes, out nativeBuf, out len, out httpStatus, err, err.Capacity);',
-            '                if (rc != 0) {',
-            '                    string msg = err.Length > 0 ? err.ToString() : ("TLS/HTTP error code " + rc);',
-            '                    throw new WebException(msg, WebExceptionStatus.ConnectFailure);',
-            '                }',
-            '                var managed = new byte[len];',
-            '                if (len > 0 && nativeBuf != IntPtr.Zero) {',
-            '                    Marshal.Copy(nativeBuf, managed, 0, len);',
-            '                }',
-            '                return managed;',
-            '            }',
-            '            finally {',
-            '                if (nativeBuf != IntPtr.Zero) {',
-            '                    AuroraHttpFree(nativeBuf);',
-            '                }',
-            '            }',
-            '        }',
-            '',
-            '        public string DownloadString(string address) {',
-            '            byte[] bytes = DownloadData(address);',
-            '            return Encoding.UTF8.GetString(bytes);',
-            '        }',
-            '',
-            '        public Stream OpenRead(string address) {',
-            '            return new MemoryStream(DownloadData(address), false);',
-            '        }',
-            '',
-            '        public void Dispose() {',
-            '        }',
-            '    }',
-            '}'
-          ) | Set-Content -Path "AuroraAssetEditor\Classes\AuroraHttpClient.cs" -Encoding utf8
-
-          $downloaderFiles = @(
-            "AuroraAssetEditor\Classes\InternetArchiveAssetDownloader.cs",
-            "AuroraAssetEditor\Classes\XboxAssetDownloader.cs",
-            "AuroraAssetEditor\Classes\XboxUnity.cs"
-          )
-          foreach ($file in $downloaderFiles) {
-            $src = Get-Content $file -Raw
-            $src = $src -replace '\bWebClient\b', 'AuroraHttpClient'
-            $src = $src.Replace('http://xboxunity.net/', 'https://xboxunity.net/')
-            Set-Content -Path $file -Value $src -Encoding utf8
-          }
-
-          $mwPath = "AuroraAssetEditor\MainWindow.xaml.cs"
-          $mw = Get-Content $mwPath -Raw
-          $mw = $mw -replace '(?s)//\s*add support for TLS 1\.1 and TLS 1\.2.*?3072;\s*//\s*TLS 1\.2', '// HTTPS/TLS 1.2 & 1.3 handled natively by AuroraTls.dll (OpenSSL 1.1.1w)'
-          Set-Content -Path $mwPath -Value $mw -Encoding utf8
-
-          $csprojPath = "AuroraAssetEditor\AuroraAssetEditor.csproj"
-          [xml]$xml = Get-Content $csprojPath -Raw
-
-          $pg = $xml.Project.PropertyGroup | Select-Object -First 1
-          $pg.TargetFramework = "net40"
-          $pg.PlatformTarget = "x86"
-          $pg.Platforms = "x86"
-
-          foreach ($kv in @{ "LangVersion" = "latest"; "DebugType" = "none"; "Optimize" = "true" }.GetEnumerator()) {
-            $el = $xml.CreateElement($kv.Key)
-            $el.InnerText = $kv.Value
-            $pg.AppendChild($el) | Out-Null
-          }
-
-          $pkgGroups = @($xml.Project.ItemGroup | Where-Object { $_.PackageReference -ne $null })
-          foreach ($g in $pkgGroups) {
-            $xml.Project.RemoveChild($g) | Out-Null
-          }
-
-          $pkgItemGroup = $xml.CreateElement("ItemGroup")
-          $refAsm = $xml.CreateElement("PackageReference")
-          $refAsm.SetAttribute("Include", "Microsoft.NETFramework.ReferenceAssemblies.net40")
-          $refAsm.SetAttribute("Version", "1.0.3")
-          $refAsm.SetAttribute("PrivateAssets", "all")
-          $pkgItemGroup.AppendChild($refAsm) | Out-Null
-          $xml.Project.AppendChild($pkgItemGroup) | Out-Null
-
-          $refItemGroup = $xml.CreateElement("ItemGroup")
-          foreach ($dll in @("Ookii.Dialogs.Wpf", "System.Data.SQLite", "System.Net.FtpClient")) {
-            $ref = $xml.CreateElement("Reference")
-            $ref.SetAttribute("Include", $dll)
-            $hint = $xml.CreateElement("HintPath")
-            $hint.InnerText = "..\xp-libs\$dll.dll"
-            $priv = $xml.CreateElement("Private")
-            $priv.InnerText = "True"
-            $ref.AppendChild($hint) | Out-Null
-            $ref.AppendChild($priv) | Out-Null
-            $refItemGroup.AppendChild($ref) | Out-Null
-          }
-          foreach ($fxRef in @("System.Runtime.Serialization", "System.Web")) {
-            $ref = $xml.CreateElement("Reference")
-            $ref.SetAttribute("Include", $fxRef)
-            $refItemGroup.AppendChild($ref) | Out-Null
-          }
-          $xml.Project.AppendChild($refItemGroup) | Out-Null
-
-          $xml.Save((Resolve-Path $csprojPath))
-
-          @(
-            '<?xml version="1.0" encoding="utf-8"?>',
-            '<configuration>',
-            '  <startup useLegacyV2RuntimeActivationPolicy="true">',
-            '    <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.0"/>',
-            '  </startup>',
-            '</configuration>'
-          ) | Set-Content -Path "AuroraAssetEditor\App.config" -Encoding utf8
+          & "${env:XP_PORT}/apply-xp-fixes.ps1" -RepoRoot 'src' -XpPortDir $env:XP_PORT
 
       - name: Compilar AuroraAssetEditor (Release | x86 | .NET 4.0)
         shell: pwsh
         run: |
-          dotnet restore AuroraAssetEditor\AuroraAssetEditor.csproj
-          dotnet publish AuroraAssetEditor\AuroraAssetEditor.csproj `
-            -c Release `
-            -f net40 `
-            -p:Platform=x86 `
-            -p:PlatformTarget=x86 `
-            -p:Optimize=true `
-            -o publish
+          dotnet restore 'src/AuroraAssetEditor/AuroraAssetEditor.csproj'
+          dotnet publish 'src/AuroraAssetEditor/AuroraAssetEditor.csproj' `
+            -c Release -f net40 -p:Platform=x86 -p:PlatformTarget=x86 -p:Optimize=true -o publish
 
-          Copy-Item "xp-native\AuroraTls.dll" "publish\AuroraTls.dll" -Force
-          Copy-Item "xp-native\cacert.pem" "publish\cacert.pem" -Force
+          Copy-Item "$env:RUNNER_TEMP/xp-native/AuroraTls.dll" 'publish/AuroraTls.dll' -Force
+          Copy-Item "$env:RUNNER_TEMP/xp-native/cacert.pem" 'publish/cacert.pem' -Force
 
-      - name: Carimbar PE Subsystem 5.01 e auditar binarios para Windows XP x86 + P4 Prescott
+      - name: Verificar XP/Prescott + smoke-test TLS 1.3
         shell: pwsh
         run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $editbin = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "editbin.exe" |
-                     Where-Object { $_.FullName -match "Hostx64\\x86" } | Select-Object -First 1
-          if (-not $editbin) {
-            $editbin = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "editbin.exe" | Select-Object -First 1
-          }
+          & "${env:XP_PORT}/verify-xp.ps1" -PublishDir 'publish' -ObjdumpPath 'C:/msys64/mingw32/bin/objdump.exe'
 
-          $exePath = (Resolve-Path "publish\AuroraAssetEditor.exe").Path
-          & $editbin.FullName /NOLOGO /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1 /TSAWARE $exePath
-          if ($LASTEXITCODE -ne 0) {
-            throw "Falha ao ajustar o cabecalho PE de AuroraAssetEditor.exe para Windows XP 5.01."
-          }
-
-          $corflags = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows" -Recurse -Filter "CorFlags.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($corflags) {
-            & $corflags.FullName /32BITREQ+ /nologo $exePath
-          }
-
-          $objdump = "C:\msys64\mingw32\bin\objdump.exe"
-
-          $vistaOnlyApis = @(
-            "AcquireSRWLockExclusive", "AcquireSRWLockShared", "InitializeSRWLock",
-            "ReleaseSRWLockExclusive", "ReleaseSRWLockShared",
-            "SleepConditionVariableCS", "WakeConditionVariable", "WakeAllConditionVariable",
-            "InitOnceExecuteOnce", "GetTickCount64", "InitializeCriticalSectionEx",
-            "GetFinalPathNameByHandleW", "GetFileInformationByHandleEx",
-            "LCMapStringEx", "CompareStringEx", "GetLocaleInfoEx",
-            "BCryptGenRandom", "WSAPoll", "inet_pton", "inet_ntop", "if_nametoindex"
-          )
-
-          Get-ChildItem "publish" -Include *.exe,*.dll -Recurse | ForEach-Object {
-            $file = $_.FullName
-            $hdr = (& $objdump -p $file | Out-String)
-
-            if ($hdr -notmatch "file format pei-i386") {
-              throw "$($_.Name) nao e um binario 32-bit (pei-i386)!"
-            }
-
-            if ($hdr -match "MajorSubsystemVersion\s+(\d+)" -and [int]$Matches[1] -gt 5) {
-              throw "$($_.Name) exige Subsystem $($Matches[1]) (> 5.01, incompativel com Windows XP)!"
-            }
-
-            if ($hdr -match "DLL Name:\s*(api-ms-win-[^\r\n]+|bcrypt\.dll)") {
-              throw "$($_.Name) depende de DLL inexistente no Windows XP: $($Matches[1])"
-            }
-
-            foreach ($api in $vistaOnlyApis) {
-              if ($hdr -match ("\b" + [regex]::Escape($api) + "\b")) {
-                throw "$($_.Name) importa API exclusiva do Windows Vista+: $api"
-              }
-            }
-
-            if ($_.Name -in @("AuroraTls.dll", "AuroraAsset.dll", "msvcr100.dll", "System.Data.SQLite.dll")) {
-              $asm = (& $objdump -d -M intel $file | Out-String)
-              if ($asm -match "\b(pshufb|palignr|pmulld|pblendw|roundss|roundsd|popcnt|lzcnt|vmovdqa|vxorps|aesenc)\b") {
-                throw "$($_.Name) contem instrucoes de CPU posteriores ao Pentium 4 Prescott ($($Matches[1]))!"
-              }
-            }
-
-            Write-Host "OK [WinXP SP3 5.01 | i386 | P4 Prescott]: $($_.Name)"
-          }
-
-          $smokeScript = Join-Path $env:RUNNER_TEMP "smoke_tls_x86.ps1"
-          @(
-            'Set-Location "publish"',
-            '$code = "using System; using System.Runtime.InteropServices; using System.Text; public static class TlsSmokeTest { [DllImport(\"AuroraTls.dll\", CallingConvention = CallingConvention.Cdecl)] public static extern int AuroraHttpGet(byte[] url, out IntPtr data, out int len, out int status, StringBuilder err, int cap); [DllImport(\"AuroraTls.dll\", CallingConvention = CallingConvention.Cdecl)] public static extern void AuroraHttpFree(IntPtr ptr); }"',
-            'Add-Type -TypeDefinition $code',
-            '$ptr = [IntPtr]::Zero; $len = 0; $status = 0',
-            '$err = New-Object System.Text.StringBuilder 512',
-            '$urlBytes = [System.Text.Encoding]::UTF8.GetBytes("https://archive.org" + [char]0)',
-            '$rc = [TlsSmokeTest]::AuroraHttpGet($urlBytes, [ref]$ptr, [ref]$len, [ref]$status, $err, $err.Capacity)',
-            'if ($ptr -ne [IntPtr]::Zero) { [TlsSmokeTest]::AuroraHttpFree($ptr) }',
-            'if ($rc -ne 0 -or $len -le 0) { throw "Smoke-test TLS falhou (rc=$rc, status=$status, err=$err)" }',
-            'Write-Host "Smoke-test HTTPS/TLS 1.3 x86 concluido com sucesso: HTTP $status ($len bytes recebidos)."'
-          ) | Set-Content -Path $smokeScript -Encoding utf8
-
-          $ps32 = "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
-          & $ps32 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $smokeScript
-          if ($LASTEXITCODE -ne 0) {
-            throw "Falha no smoke-test x86 da AuroraTls.dll."
-          }
-
-      - name: Empacotar ZIP da Release
+      - name: Empacotar ZIP + SHA256
         shell: pwsh
         run: |
-          $tag = if ("${{ github.ref_type }}" -eq "tag") {
-            "${{ github.ref_name }}"
-          } else {
-            "${{ inputs.tag_name }}"
-          }
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "v1.4.4-xp-prescott" }
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "${{ inputs.tag_name }}" }
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = 'v1.4.3-xp-prescott' }
 
-          $zipName = "AuroraAssetEditor-$tag-WinXP-x86-Prescott-TLS13.zip"
-          Compress-Archive -Path "publish\*" -DestinationPath $zipName -CompressionLevel Optimal
+          $zip = "AuroraAssetEditor-$tag-WinXP-x86-Prescott-TLS13.zip"
+          Compress-Archive -Path 'publish/*' -DestinationPath $zip -CompressionLevel Optimal
 
-          $sha256 = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$sha256  $zipName" | Set-Content -Path "$zipName.sha256" -Encoding ascii
+          $sha = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$sha  $zip" | Set-Content -Path "$zip.sha256" -Encoding ascii
 
-          "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIP_NAME=$zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Guardar Artefacto no GitHub Actions
