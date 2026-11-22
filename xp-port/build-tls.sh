@@ -409,10 +409,13 @@ exec > >(tee "${LOG_FILE}") 2>&1
 
 on_exit() {
     local status=$?
+    local line
     if [ "${status}" -ne 0 ]; then
         sleep 2
-        printf '::error title=build-tls.sh (exit %s, cauda do log)::%s\n' \
-            "${status}" "$(tail -n 12 "${LOG_FILE}" | tr '\r\n' '  ' | cut -c1-900)"
+        # Últimas 8 linhas do log, uma anotação por linha (limite: 10 por step).
+        tail -n 8 "${LOG_FILE}" | while IFS= read -r line; do
+            printf '::error title=build-tls.sh (exit %s)::%s\n' "${status}" "${line:0:1000}"
+        done
     fi
 }
 trap on_exit EXIT
