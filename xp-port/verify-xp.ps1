@@ -36,21 +36,29 @@ function Resolve-FullPath {
 }
 
 function Find-Objdump {
+    # O explicito (-ObjdumpPath, ficheiro ou diretório) tem prioridade; depois
+    # o root devolvido pelo msys2/setup-msys2 (MSYS2_LOCATION) e as localizações
+    # habituais.  O -ObjdumpPath inexistente não aborta logo: cai para a busca.
+    $candidates = @()
     if (-not [string]::IsNullOrWhiteSpace($ObjdumpPath)) {
-        if (-not (Test-Path -LiteralPath $ObjdumpPath)) {
-            throw "objdump não encontrado: $ObjdumpPath"
-        }
-        return (Resolve-Path -LiteralPath $ObjdumpPath).Path
+        $candidates += $ObjdumpPath
+        $candidates += (Join-Path $ObjdumpPath "objdump.exe")
     }
 
-    $candidates = @(
-        "C:\msys64\mingw32\bin\objdump.exe",
-        "C:\msys64\usr\bin\objdump.exe"
-    )
+    $roots = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:MSYS2_LOCATION)) {
+        $roots += $env:MSYS2_LOCATION
+    }
+    $roots += @("C:\msys64", "D:\msys64")
+
+    foreach ($root in $roots) {
+        $candidates += (Join-Path $root "mingw32\bin\objdump.exe")
+        $candidates += (Join-Path $root "usr\bin\objdump.exe")
+    }
 
     foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
         }
     }
 
@@ -59,7 +67,7 @@ function Find-Objdump {
         return $command.Source
     }
 
-    throw "objdump.exe não encontrado. Instala o MSYS2/MINGW32 ou passa -ObjdumpPath."
+    throw "objdump.exe não encontrado. Instala o MSYS2/MINGW32, define MSYS2_LOCATION ou passa -ObjdumpPath. Procurei em: $($candidates -join ', ')"
 }
 
 function Find-EditBin {
