@@ -65,10 +65,9 @@ jobs:
 
           PREFIX="${DEPS_PREFIX}"
           BUILD_ROOT="/tmp/xp-build"
-          mkdir -p "${PREFIX}" "${BUILD_ROOT}"
+          mkdir -p "${PREFIX}/include" "${PREFIX}/lib" "${BUILD_ROOT}"
           cd "${BUILD_ROOT}"
 
-          # Flags específicas para Windows XP SP3 (0x0501) e Pentium 4 HT Prescott (SSE2 + SSE3, sem SSSE3/SSE4/AVX)
           export XP_CPU_FLAGS="-O2 -march=prescott -mtune=prescott -msse2 -msse3 -mno-ssse3 -mno-sse4 -mno-avx -mfpmath=sse"
           export XP_WIN_DEFS="-D_WIN32_WINNT=0x0501 -DWINVER=0x0501"
           export CFLAGS="${XP_CPU_FLAGS} ${XP_WIN_DEFS}"
@@ -79,18 +78,12 @@ jobs:
           curl -fsSL "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz" -o zlib.tar.gz
           tar -xzf zlib.tar.gz
           cd "zlib-${ZLIB_VERSION}"
-          make -f win32/Makefile.gcc \
-            CFLAGS="${CFLAGS}" \
-            SHARED_MODE=0 \
-            libz.a
-          cp -f zlib.h zconf.h "${PREFIX}/include/" 2>/dev/null || (mkdir -p "${PREFIX}/include" && cp -f zlib.h zconf.h "${PREFIX}/include/")
-          mkdir -p "${PREFIX}/lib"
+          make -f win32/Makefile.gcc CFLAGS="${CFLAGS}" SHARED_MODE=0 libz.a
+          cp -f zlib.h zconf.h "${PREFIX}/include/"
           cp -f libz.a "${PREFIX}/lib/"
           cd "${BUILD_ROOT}"
 
-          # 2. Compilar OpenSSL 1.1.1w estático (TLS 1.2 + TLS 1.3, nativo WinXP CryptGenRandom + CRITICAL_SECTION)
-          #    Nota: no-asm garante que zero rotinas ASM usem SSSE3/AVX sem necessidade, mantendo performance excelente
-          #    com -march=prescott -msse3 -mfpmath=sse e 100% determinismo na auditoria objdump para Prescott!
+          # 2. Compilar OpenSSL 1.1.1w estático (TLS 1.2 + TLS 1.3, nativo WinXP)
           curl -fsSL "https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl.tar.gz
           tar -xzf openssl.tar.gz
           cd "openssl-${OPENSSL_VERSION}"
@@ -109,12 +102,11 @@ jobs:
           make install_dev
           cd "${BUILD_ROOT}"
 
-          # 3. Compilar libcurl estático (apenas HTTP/HTTPS, forçando ausência de APIs Vista+ como WSAPoll / inet_pton / GetTickCount64)
+          # 3. Compilar libcurl estático (HTTP/HTTPS apenas, sem APIs Vista+)
           curl -fsSL "https://github.com/curl/curl/releases/download/curl-8_11_0/curl-${CURL_VERSION}.tar.gz" -o curl.tar.gz
           tar -xzf curl.tar.gz
           cd "curl-${CURL_VERSION}"
 
-          # Garantir em cache do autoconf que libcurl não usa funções ausentes no ws2_32.dll / kernel32.dll do Windows XP
           export ac_cv_func_poll=no
           export ac_cv_func_WSAPoll=no
           export ac_cv_func_inet_pton=no
@@ -171,6 +163,7 @@ jobs:
           #define WINVER 0x0501
           #define CURL_STATICLIB
           #include <windows.h>
+          #include <stdio.h>
           #include <stdlib.h>
           #include <string.h>
           #include <wchar.h>
@@ -182,8 +175,7 @@ jobs:
               size_t cap;
           } MemBuf;
 
-          static INIT_ONCE_STATIC_DUMMY;
-          static LONG g_init_state = 0; /* 0 = uninit, 1 = initializing, 2 = ready */
+          static volatile LONG g_init_state = 0; /* 0 = uninit, 1 = initializing, 2 = ready */
           static CURLSH *g_share = NULL;
           static CRITICAL_SECTION g_locks[CURL_LOCK_DATA_LAST];
           static char g_ca_bundle_utf8[MAX_PATH * 3] = {0};
@@ -206,9 +198,7 @@ jobs:
           static void locate_ca_bundle(void) {
               wchar_t module_path[MAX_PATH];
               wchar_t ca_path[MAX_PATH];
-              HMODULE hMod = NULL;
 
-              /* Obter pasta onde está a AuroraTls.dll / AuroraAssetEditor.exe (compatível XP SP3) */
               if (GetModuleFileNameW(NULL, module_path, MAX_PATH) > 0) {
                   wchar_t *slash = wcsrchr(module_path, L'\\');
                   if (slash) {
@@ -217,18 +207,17 @@ jobs:
                       ca_path[MAX_PATH - 1] = L'\0';
                       DWORD attr = GetFileAttributesW(ca_path);
                       if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-                          if (WideCharToMultiByte(CP_UTF8, 0, ca_path, -1, g_ca_bundle_utf8, sizeof(g_ca_bundle_utf8), NULL, NULL) > 0) {
+                          if (WideCharToMultiByte(CP_UTF8, 0, ca_path, -1, g_ca_bundle_utf8, (int)sizeof(g_ca_bundle_utf8), NULL, NULL) > 0) {
                               g_has_ca_bundle = 1;
                           }
                       }
                   }
               }
-              (void)hMod;
           }
 
           static void ensure_initialized(void) {
               while (g_init_state != 2) {
-                  if (InterlockedCompareExchange(&g_init_state, 1, 0) == 0) {
+                  if (InterlockedCompareExchange((LONG *)&g_init_state, 1, 0) == 0) {
                       int i;
                       for (i = 0; i < CURL_LOCK_DATA_LAST; i++) {
                           InitializeCriticalSectionAndSpinCount(&g_locks[i], 4000);
@@ -244,7 +233,7 @@ jobs:
                           curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
                           curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
                       }
-                      InterlockedExchange(&g_init_state, 2);
+                      InterlockedExchange((LONG *)&g_init_state, 2);
                       break;
                   }
                   Sleep(1);
@@ -288,7 +277,7 @@ jobs:
               curl_easy_setopt(curl, CURLOPT_USERAGENT, "AuroraAssetEditor/1.4 (Windows NT 5.1; x86)");
               curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
               curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-              curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, ""); /* gzip/deflate automático */
+              curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
               curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
               curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
               curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -333,11 +322,9 @@ jobs:
               long http_code = 0;
               char err_buf[CURL_ERROR_SIZE] = {0};
 
-              /* 1ª tentativa: validar certificado com cacert.pem (se presente) */
               int use_verify = g_has_ca_bundle ? 1 : 0;
               CURLcode res = perform_request(url, &chunk, &http_code, use_verify, err_buf);
 
-              /* Fallback automático no Windows XP (ex.: relógio CMOS desactualizado ou proxy SSL doméstico) */
               if (use_verify && (res == CURLE_SSL_CACERT || res == CURLE_PEER_FAILED_VERIFICATION || res == CURLE_SSL_CACERT_BADFILE)) {
                   free(chunk.data);
                   chunk.data = NULL;
@@ -367,7 +354,6 @@ jobs:
                   return 1000 + (int)http_code;
               }
 
-              /* Garantir buffer válido mesmo para respostas vazias (0 bytes) */
               if (!chunk.data) {
                   chunk.data = (unsigned char *)malloc(1);
                   if (!chunk.data) return -2;
@@ -401,7 +387,6 @@ jobs:
             -s \
             -o xp-native/AuroraTls.dll
 
-          # Descarregar bundle oficial actualizado de certificados raiz Mozilla (curl.se)
           curl -fsSL "https://curl.se/ca/cacert.pem" -o xp-native/cacert.pem
 
       - name: Configurar .NET SDK
@@ -414,7 +399,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path "xp-libs" | Out-Null
 
-          # Extrair binários .NET 2.0/4.0 com subsistema 5.01 (Windows XP) do commit 52cd4ac
           cmd /c "git cat-file -p 52cd4ac:AuroraAssetEditor/Ookii.Dialogs.Wpf.dll > xp-libs\Ookii.Dialogs.Wpf.dll"
           cmd /c "git cat-file -p 52cd4ac:AuroraAssetEditor/System.Net.FtpClient.dll > xp-libs\System.Net.FtpClient.dll"
           cmd /c "git cat-file -p 52cd4ac:AuroraAssetEditor/System.Data.SQLite.dll > xp-libs\System.Data.SQLite.dll"
@@ -422,7 +406,6 @@ jobs:
       - name: Injectar AuroraHttpClient (OpenSSL TLS 1.2/1.3) e adaptar .csproj para .NET 4.0 x86
         shell: pwsh
         run: |
-          # 1. Criar wrapper C# AuroraHttpClient compatível com as assinaturas de System.Net.WebClient
           @'
           namespace AuroraAssetEditor.Classes {
               using System;
@@ -434,7 +417,7 @@ jobs:
               internal sealed class AuroraHttpClient : IDisposable {
                   [DllImport("AuroraTls.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
                   private static extern int AuroraHttpGet(
-                      [MarshalAs(UnmanagedType.LPUTF8Str)] string url,
+                      byte[] utf8Url,
                       out IntPtr outData,
                       out int outLen,
                       out int outHttpStatus,
@@ -456,9 +439,10 @@ jobs:
                       int len = 0;
                       int httpStatus = 0;
                       var err = new StringBuilder(512);
+                      byte[] urlBytes = Encoding.UTF8.GetBytes(address + "\0");
 
                       try {
-                          int rc = AuroraHttpGet(address, out nativeBuf, out len, out httpStatus, err, err.Capacity);
+                          int rc = AuroraHttpGet(urlBytes, out nativeBuf, out len, out httpStatus, err, err.Capacity);
                           if (rc != 0) {
                               string msg = err.Length > 0 ? err.ToString() : ("TLS/HTTP error code " + rc);
                               throw new WebException(msg, WebExceptionStatus.ConnectFailure);
@@ -486,13 +470,11 @@ jobs:
                   }
 
                   public void Dispose() {
-                      // Os handles Keep-Alive e sessões TLS são geridos pelo CURLSH nativo em AuroraTls.dll
                   }
               }
           }
           '@ | Set-Content -Path "AuroraAssetEditor\Classes\AuroraHttpClient.cs" -Encoding utf8
 
-          # 2. Substituir todos os usos de WebClient por AuroraHttpClient nos 3 ficheiros de download online
           $downloaderFiles = @(
             "AuroraAssetEditor\Classes\InternetArchiveAssetDownloader.cs",
             "AuroraAssetEditor\Classes\XboxAssetDownloader.cs",
@@ -501,18 +483,15 @@ jobs:
           foreach ($file in $downloaderFiles) {
             $src = Get-Content $file -Raw
             $src = $src -replace '\bWebClient\b', 'AuroraHttpClient'
-            # Mudar URLs http:// antigos que hoje redireccionam sempre para https://, evitando 1 round-trip extra no XP:
             $src = $src.Replace('http://xboxunity.net/', 'https://xboxunity.net/')
             Set-Content -Path $file -Value $src -Encoding utf8
           }
 
-          # 3. Remover a configuração SChannel TLS 1.1/1.2 em MainWindow.xaml.cs (incompatível com XP e já desnecessária com OpenSSL)
           $mwPath = "AuroraAssetEditor\MainWindow.xaml.cs"
           $mw = Get-Content $mwPath -Raw
           $mw = $mw -replace '(?s)//\s*add support for TLS 1\.1 and TLS 1\.2.*?3072;\s*//\s*TLS 1\.2', '// HTTPS/TLS 1.2 & 1.3 handled natively by AuroraTls.dll (OpenSSL 1.1.1w)'
           Set-Content -Path $mwPath -Value $mw -Encoding utf8
 
-          # 4. Adaptar AuroraAssetEditor.csproj para .NET 4.0 + x86
           $csprojPath = "AuroraAssetEditor\AuroraAssetEditor.csproj"
           [xml]$xml = Get-Content $csprojPath -Raw
 
@@ -561,7 +540,6 @@ jobs:
 
           $xml.Save((Resolve-Path $csprojPath))
 
-          # 5. App.config para activação limpa de DLLs .NET 2.0/4.0 em Windows XP SP3
           @'
           <?xml version="1.0" encoding="utf-8"?>
           <configuration>
@@ -574,13 +552,6 @@ jobs:
       - name: Compilar AuroraAssetEditor (Release | x86 | .NET 4.0)
         shell: pwsh
         run: |
-          # Nota: UnmanagedType.LPUTF8Str só existe em .NET 4.7+, usar marshaling UTF-8 explícito compatível com .NET 4.0:
-          $httpFile = "AuroraAssetEditor\Classes\AuroraHttpClient.cs"
-          $httpSrc = Get-Content $httpFile -Raw
-          $httpSrc = $httpSrc.Replace('[MarshalAs(UnmanagedType.LPUTF8Str)] string url', 'byte[] utf8Url')
-          $httpSrc = $httpSrc.Replace('AuroraHttpGet(address,', 'AuroraHttpGet(Encoding.UTF8.GetBytes(address + "\0"),')
-          Set-Content -Path $httpFile -Value $httpSrc -Encoding utf8
-
           dotnet restore AuroraAssetEditor\AuroraAssetEditor.csproj
           dotnet publish AuroraAssetEditor\AuroraAssetEditor.csproj `
             -c Release `
@@ -598,17 +569,25 @@ jobs:
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          $vcVars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars32.bat"
+          $editbin = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "editbin.exe" |
+                     Where-Object { $_.FullName -match "Hostx64\\x86" } | Select-Object -First 1
+          if (-not $editbin) {
+            $editbin = Get-ChildItem "$vsPath\VC\Tools\MSVC" -Recurse -Filter "editbin.exe" | Select-Object -First 1
+          }
 
-          $exePath = Resolve-Path "publish\AuroraAssetEditor.exe"
-          cmd /c "`"$vcVars`" && corflags /32BITREQ+ /nologo `"$exePath`" && editbin /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1 /TSAWARE `"$exePath`""
+          $exePath = (Resolve-Path "publish\AuroraAssetEditor.exe").Path
+          & $editbin.FullName /NOLOGO /SUBSYSTEM:WINDOWS,5.01 /OSVERSION:5.1 /TSAWARE $exePath
           if ($LASTEXITCODE -ne 0) {
             throw "Falha ao ajustar o cabeçalho PE de AuroraAssetEditor.exe para Windows XP 5.01."
           }
 
+          $corflags = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows" -Recurse -Filter "CorFlags.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($corflags) {
+            & $corflags.FullName /32BITREQ+ /nologo $exePath
+          }
+
           $objdump = "C:\msys64\mingw32\bin\objdump.exe"
 
-          # Lista negra de APIs do Windows Vista+ que quebram o carregamento de DLLs no Windows XP SP3
           $vistaOnlyApis = @(
             "AcquireSRWLockExclusive", "AcquireSRWLockShared", "InitializeSRWLock",
             "ReleaseSRWLockExclusive", "ReleaseSRWLockShared",
@@ -641,7 +620,6 @@ jobs:
               }
             }
 
-            # Verificar que todas as DLLs nativas não contêm instruções pós-Prescott (SSSE3 / SSE4 / AVX)
             if ($_.Name -in @("AuroraTls.dll", "AuroraAsset.dll", "msvcr100.dll", "System.Data.SQLite.dll")) {
               $asm = (& $objdump -d -M intel $file | Out-String)
               if ($asm -match "\b(pshufb|palignr|pmulld|pblendw|roundss|roundsd|popcnt|lzcnt|vmovdqa|vxorps|aesenc)\b") {
@@ -652,29 +630,36 @@ jobs:
             Write-Host "OK [WinXP SP3 5.01 | i386 | P4 Prescott]: $($_.Name)"
           }
 
-          # Smoke-test rápido em tempo de CI: testar um GET HTTPS TLS 1.3 real através da AuroraTls.dll!
-          Add-Type -TypeDefinition @'
-          using System;
-          using System.Runtime.InteropServices;
-          using System.Text;
-          public static class TlsSmokeTest {
-              [DllImport("publish\\AuroraTls.dll", CallingConvention = CallingConvention.Cdecl)]
-              public static extern int AuroraHttpGet(byte[] url, out IntPtr data, out int len, out int status, StringBuilder err, int cap);
-              [DllImport("publish\\AuroraTls.dll", CallingConvention = CallingConvention.Cdecl)]
-              public static extern void AuroraHttpFree(IntPtr ptr);
+          # Smoke-test em PowerShell 32-bit (SysWOW64) para testar carregamento x86 + HTTPS TLS 1.3 real na AuroraTls.dll
+          $ps32 = "$env:SystemRoot\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+          & $ps32 -NoProfile -NonInteractive -Command {
+            Set-Location "publish"
+            Add-Type -TypeDefinition @'
+            using System;
+            using System.Runtime.InteropServices;
+            using System.Text;
+            public static class TlsSmokeTest {
+                [DllImport("AuroraTls.dll", CallingConvention = CallingConvention.Cdecl)]
+                public static extern int AuroraHttpGet(byte[] url, out IntPtr data, out int len, out int status, StringBuilder err, int cap);
+                [DllImport("AuroraTls.dll", CallingConvention = CallingConvention.Cdecl)]
+                public static extern void AuroraHttpFree(IntPtr ptr);
+            }
+'@
+            $ptr = [IntPtr]::Zero
+            $len = 0
+            $status = 0
+            $err = New-Object System.Text.StringBuilder 512
+            $urlBytes = [System.Text.Encoding]::UTF8.GetBytes("https://archive.org`0")
+            $rc = [TlsSmokeTest]::AuroraHttpGet($urlBytes, [ref]$ptr, [ref]$len, [ref]$status, $err, $err.Capacity)
+            if ($ptr -ne [IntPtr]::Zero) { [TlsSmokeTest]::AuroraHttpFree($ptr) }
+            if ($rc -ne 0 -or $len -le 0) {
+              throw "Smoke-test TLS falhou (rc=$rc, status=$status, err=$err)"
+            }
+            Write-Host "Smoke-test HTTPS/TLS 1.3 x86 concluido com sucesso: HTTP $status ($len bytes recebidos)."
           }
-          '@
-          $ptr = [IntPtr]::Zero
-          $len = 0
-          $status = 0
-          $err = New-Object System.Text.StringBuilder 512
-          $urlBytes = [System.Text.Encoding]::UTF8.GetBytes("https://archive.org`0")
-          $rc = [TlsSmokeTest]::AuroraHttpGet($urlBytes, [ref]$ptr, [ref]$len, [ref]$status, $err, $err.Capacity)
-          if ($ptr -ne [IntPtr]::Zero) { [TlsSmokeTest]::AuroraHttpFree($ptr) }
-          if ($rc -ne 0 -or $len -le 0) {
-            throw "Smoke-test TLS falhou (rc=$rc, status=$status, err=$err)"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Falha no smoke-test x86 da AuroraTls.dll."
           }
-          Write-Host "Smoke-test HTTPS/TLS 1.3 concluido com sucesso: HTTP $status ($len bytes recebidos)."
 
       - name: Empacotar ZIP da Release
         shell: pwsh
