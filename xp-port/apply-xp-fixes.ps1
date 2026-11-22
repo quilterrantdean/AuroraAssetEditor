@@ -252,10 +252,10 @@ Set-ProjectProperty $propertyGroup "DebugType" "none"
 
 # Remover todas as PackageReference (o upstream usa Ookii 5.0.1 e
 # System.Data.SQLite 1.0.118, ambos incompatíveis com XP/.NET 4.0).
-foreach ($group in @($project.ItemGroup)) {
-    foreach ($package in @($group.PackageReference)) {
-        $group.RemoveChild($package) | Out-Null
-    }
+# SelectNodes evita o @($null) que o adaptador XML devolve para filhos
+# inexistentes.
+foreach ($package in @($project.SelectNodes("ItemGroup/PackageReference"))) {
+    [void]$package.ParentNode.RemoveChild($package)
 }
 
 $referenceNames = @(
@@ -267,19 +267,15 @@ $referenceNames = @(
 )
 
 # Remover referências pré-existentes com o mesmo nome (script idempotente).
-foreach ($group in @($project.ItemGroup)) {
-    foreach ($reference in @($group.Reference)) {
-        if ($referenceNames -contains $reference.Include) {
-            $group.RemoveChild($reference) | Out-Null
-        }
+foreach ($reference in @($project.SelectNodes("ItemGroup/Reference"))) {
+    if ($referenceNames -contains $reference.GetAttribute("Include")) {
+        [void]$reference.ParentNode.RemoveChild($reference)
     }
 }
 
 # Remover ItemGroups que ficaram vazios.
-foreach ($group in @($project.ItemGroup)) {
-    if ($group.ChildNodes.Count -eq 0) {
-        $project.RemoveChild($group) | Out-Null
-    }
+foreach ($group in @($project.SelectNodes("ItemGroup[not(*)]"))) {
+    [void]$project.RemoveChild($group)
 }
 
 # Microsoft.NETFramework.ReferenceAssemblies.net40 1.0.3
