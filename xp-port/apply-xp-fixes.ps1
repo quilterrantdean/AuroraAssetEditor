@@ -28,6 +28,23 @@ function Write-Step {
     Write-Host "==> $Message"
 }
 
+function Set-ProjectProperty {
+    param(
+        [System.Xml.XmlElement]$Group,
+        [string]$Name,
+        [string]$Value
+    )
+    $node = $Group.SelectSingleNode($Name)
+    if ($null -eq $node) {
+        $node = $Group.OwnerDocument.CreateElement($Name)
+        $node.InnerText = $Value
+        [void]$Group.AppendChild($node)
+    }
+    else {
+        $node.InnerText = $Value
+    }
+}
+
 function Write-TextFile {
     param(
         [string]$Path,
@@ -224,12 +241,14 @@ if ($null -eq $propertyGroup) {
     throw "Não foi encontrado um PropertyGroup com <TargetFramework> em $csprojPath"
 }
 
-$propertyGroup.TargetFramework = "net40"
-$propertyGroup.PlatformTarget = "x86"
-$propertyGroup.Platforms = "x86"
-$propertyGroup.LangVersion = "latest"
-$propertyGroup.Optimize = "true"
-$propertyGroup.DebugType = "none"
+# O adaptador XML do PowerShell não cria elementos novos por atribuição de
+# propriedade: procurar o filho e criá-lo se não existir.
+Set-ProjectProperty $propertyGroup "TargetFramework" "net40"
+Set-ProjectProperty $propertyGroup "PlatformTarget" "x86"
+Set-ProjectProperty $propertyGroup "Platforms" "x86"
+Set-ProjectProperty $propertyGroup "LangVersion" "latest"
+Set-ProjectProperty $propertyGroup "Optimize" "true"
+Set-ProjectProperty $propertyGroup "DebugType" "none"
 
 # Remover todas as PackageReference (o upstream usa Ookii 5.0.1 e
 # System.Data.SQLite 1.0.118, ambos incompatíveis com XP/.NET 4.0).
