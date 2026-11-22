@@ -19,7 +19,7 @@ aplicadas em tempo de build a um checkout fresco do upstream pelo
 | `AuroraHttpClient.cs` | Substituto de `WebClient` para .NET 4.0 que faz P/Invoke à `AuroraTls.dll` com buffers UTF-8 `byte[]`. |
 | `Net40Polyfills.cs` | Polyfills mínimos de .NET 4.0 (`CallerMemberName` etc.) para atributos do compilador que só existem no .NET 4.5+ e que as fontes upstream usam. |
 | `App.config` | Configuração do runtime .NET 4.0 (`useLegacyV2RuntimeActivationPolicy`). |
-| `apply-xp-fixes.ps1` | Patcher baseado em regras: recupera as DLLs XP do commit `52cd4ac`, copia o shim/polyfills/config, substitui `WebClient`, passa xboxunity para HTTPS, remove o `ServicePointManager.SecurityProtocol` que rebenta no XP e reescreve o csproj para `net40`/`x86`. |
+| `apply-xp-fixes.ps1` | Patcher baseado em regras: recupera as DLLs XP do commit `52cd4ac`, copia o shim/polyfills/config, substitui `WebClient`, troca `WebUtility.UrlEncode/UrlDecode` (.NET 4.5+) por `System.Web.HttpUtility`, passa xboxunity para HTTPS, remove o `ServicePointManager.SecurityProtocol` que rebenta no XP e reescreve o csproj para `net40`/`x86`. |
 | `verify-xp.ps1` | Carimbagem `editbin`/`CorFlags`, auditoria completa com `objdump` (PE32, Subsystem <= 5.01, allowlist de imports, blocklist de APIs Vista+, blocklist de instruções pós-Prescott) e um smoke-test real TLS 1.3 em PowerShell 32 bits contra `https://archive.org`. |
 
 ## Como a release é produzida

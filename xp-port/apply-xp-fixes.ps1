@@ -204,6 +204,19 @@ foreach ($relative in $downloaderFiles) {
     Write-Step "AuroraHttpClient aplicado a $relative"
 }
 
+# System.Net.WebUtility.{UrlEncode,UrlDecode} só existem no .NET 4.5+; o
+# HttpUtility do System.Web (referenciado) tem exactamente a mesma semântica.
+# Aplicado a todos os .cs para ser resiliente a futuras alterações do upstream.
+$webUtilityPattern = '\bWebUtility\.(UrlEncode|UrlDecode)\('
+foreach ($source in @(Get-ChildItem -LiteralPath $projectDir -Recurse -Filter "*.cs" -File)) {
+    $text = Get-Content -LiteralPath $source.FullName -Raw -Encoding UTF8
+    if ($text -match $webUtilityPattern) {
+        $text = [regex]::Replace($text, $webUtilityPattern, 'System.Web.HttpUtility.$1(')
+        Write-TextFile -Path $source.FullName -Text $text
+        Write-Step "WebUtility -> System.Web.HttpUtility em $($source.Name)"
+    }
+}
+
 # Remover a atribuição ServicePointManager.SecurityProtocol que rebenta no XP:
 # o TLS 1.2/1.3 é tratado pela camada nativa; o .NET 4.0 no XP lança exceção
 # para 768/3072.
